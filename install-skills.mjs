@@ -49,6 +49,13 @@
  *   skills / commands / agents 三个目录都是「先备份、再清空、再按配置写回」，
  *   保证本机目录与配置文件严格一致。备份留在 <目录>.backup-<时间戳>。
  *
+ *   三条例外（都不会动目录）：
+ *     - 配置里某个组没有条目 → 整个组跳过，目录原样保留
+ *     - 某个组有条目在检出里找不到 → 该组跳过，目录原样保留（其余组照常装）
+ *     - 清空目录本身失败 → 该组跳过，目录原样保留
+ *
+ *   出问题时的行为：单个条目失败只跳过它自己；备份目录和缓存清理一定会执行。
+ *
  * 退出码：0 = 全部校验通过；1 = 有安装或校验失败。
  */
 
@@ -657,7 +664,7 @@ function backupAndClearDir(dir, { dryRun, label }) {
   const backupDir = uniqueBackupDir(dir);
   if (dryRun) {
     log(`[dry-run] 将清空 ${dir} 并备份到 ${backupDir}`);
-    return backupDir;
+    return ''; // dry-run 不会真的产生备份，别把不存在的路径报给用户
   }
 
   log(`备份现有 ${label} → ${backupDir}`);
@@ -946,7 +953,7 @@ async function main() {
   const items = config.items.filter(item => groups.includes(item.kind));
   for (const group of groups) {
     const count = items.filter(item => item.kind === group).length;
-    log(`${group.padEnd(9)} = ${count} 项`);
+    log(`${group.padEnd(9)} = ${count} 项${count === 0 ? '（无配置，将跳过，不动目录）' : ''}`);
   }
 
   // 2. 先把 GitHub 检出准备好 —— 下载失败就整体中止，不动本机任何目录
@@ -967,110 +974,169 @@ async function main() {
     log('--- 全部组件都有本地覆盖，无需下载 ---');
   }
 
-  // 3. 逐组清空重装
+  // 3~6 装进 try-finally：无论走到哪一步、哪怕中途抛异常，
+  // 备份目录和缓存清理都必须执行 —— 用户需要知道东西备份到哪了。
   let installFailed = false;
+  let hooksFailed = false;
+  let verifyFailed = 0;
   const sources = new Map();
   const backups = [];
+  const skippedGroups = new Map();
 
-  for (const group of groups) {
-    const groupItems = items.filter(item => item.kind === group);
-    const dir = path.join(claudeHome, GROUP_DIRS[group]);
+  try {
+    // 3.1 全量来源预检 —— 先把所有条目的来源解析出来，问题一次性报全。
+    //     解析不出来的组不会被清空、也不会安装（见 3.2）。
+    const problemsByGroup = new Map();
+    for (const group of groups) {
+      for (const item of items.filter(entry => entry.kind === group)) {
+        const checkout = resolved.checkouts.get(`${item.repo}@${item.ref}`);
+        const source = item.localUsable ? item.local : resolveItemSource(item, checkout);
+        if (!source) {
+          const message = `${group}/${item.id}: 在 ${item.repo}@${item.ref} 里找不到 ${item.path}`;
+          if (!problemsByGroup.has(group)) problemsByGroup.set(group, []);
+          problemsByGroup.get(group).push(message);
+        } else {
+          sources.set(`${group}:${item.id}`, source);
+        }
+      }
+    }
+    for (const [group, problems] of problemsByGroup) {
+      for (const problem of problems) fail(problem);
+      fail(`${group} 有 ${problems.length} 个条目来源解析失败，该组不会清空也不会安装`);
+    }
 
-    log(`--- 安装 ${group} ---`);
-    if (options.clear) {
-      const backupDir = backupAndClearDir(dir, { dryRun: options.dryRun, label: group });
-      if (backupDir) backups.push(backupDir);
+    // 3.2 逐组清空重装
+    for (const group of groups) {
+      const groupItems = items.filter(item => item.kind === group);
+      const dir = path.join(claudeHome, GROUP_DIRS[group]);
+
+      if (groupItems.length === 0) {
+        // 配置里没有这一组 → 一个字节都不动。
+        // 历史上这里会照常清空：用户手写的 agents 被搬进备份后目录变空，
+        // 校验表是空的、无任何提示，退出码还是 0 —— 看着像装成功了，其实东西没了。
+        log(`--- 跳过 ${group}：配置里没有条目，不动 ${dir} ---`);
+        continue;
+      }
+
+      if (problemsByGroup.has(group)) {
+        // 该组有条目解析不到来源 → 不清空这一组。原内容留在原地，
+        // 不会被搬空成半成品。
+        fail(`--- 跳过 ${group}：来源解析失败，未清空 ${dir} ---`);
+        skippedGroups.set(group, '来源解析失败，该组未安装');
+        installFailed = true;
+        continue;
+      }
+
+      log(`--- 安装 ${group} ---`);
+      try {
+        if (options.clear) {
+          const backupDir = backupAndClearDir(dir, { dryRun: options.dryRun, label: group });
+          if (backupDir) backups.push(backupDir);
+        } else {
+          log(`[${options.dryRun ? 'dry-run ' : ''}]不清空 ${dir}，直接覆盖安装`);
+        }
+      } catch (error) {
+        fail(`清空 ${group} 目录失败: ${error.message}`);
+        skippedGroups.set(group, `目录清空失败，该组未安装`);
+        installFailed = true;
+        continue;
+      }
+
+      for (const item of groupItems) {
+        try {
+          const source = sources.get(`${group}:${item.id}`);
+          const origin = item.localUsable ? '本地覆盖' : `${item.repo}@${item.ref}`;
+          // 目标路径必须落在本组目录内 —— id 已在配置校验里过了白名单，这里再兜一层
+          const target =
+            group === 'skills'
+              ? resolveInside(dir, item.id)
+              : resolveInside(dir, `${item.id}${COMPONENT_EXT}`);
+          if (!target) {
+            fail(`${group}/${item.id}: 目标路径越界，拒绝写入（${dir}）`);
+            installFailed = true;
+            continue;
+          }
+
+          if (options.dryRun) {
+            log(`[dry-run] install ${group}/${item.id} ← ${origin}: ${source}`);
+            continue;
+          }
+
+          if (group === 'skills') {
+            fs.rmSync(target, { recursive: true, force: true });
+            const normalized = copyTree(source, target, { normalize: true });
+            log(`install ${group}/${item.id} ← ${origin}`);
+            if (normalized > 0) log(`  行尾规范化：${normalized} 个文件 CRLF → LF`);
+          } else {
+            fs.mkdirSync(dir, { recursive: true });
+            fs.copyFileSync(source, target);
+            log(`install ${group}/${item.id} ← ${origin}`);
+          }
+        } catch (error) {
+          // 单个条目失败不能带崩整个安装 —— 也要说清是哪一个炸了
+          fail(`${group}/${item.id}: ${error.message}`);
+          installFailed = true;
+        }
+      }
+    }
+
+    // 4. hooks 设置
+    log('--- 配置 hooks ---');
+    if (options.dryRun) {
+      log(
+        `[dry-run] 将幂等地写入 ${settingsFile} 的 PreToolUse/PostToolUse observe.sh 钩子 + PYTHONUTF8=1（observe.sh 已安装时才注册）`,
+      );
     } else {
-      log(`[${options.dryRun ? 'dry-run ' : ''}]不清空 ${dir}，直接覆盖安装`);
+      try {
+        configureHooks(settingsFile, claudeHome);
+      } catch (error) {
+        // 不能在这里 exit：组件已经装好了，直接退出会跳过收尾（备份目录提示 + 检出缓存清理）
+        fail(`配置 hooks 失败: ${error.message}`);
+        hooksFailed = true;
+      }
     }
 
-    for (const item of groupItems) {
-      const checkout = resolved.checkouts.get(`${item.repo}@${item.ref}`);
-      const source = item.localUsable ? item.local : resolveItemSource(item, checkout);
-      if (!source) {
-        fail(`${group}/${item.id}: 在 ${item.repo}@${item.ref} 里找不到 ${item.path}`);
+    // 5. 校验
+    log('--- 校验安装结果 ---');
+    for (const group of groups) {
+      const groupItems = items.filter(item => item.kind === group);
+      if (groupItems.length === 0) continue; // 没什么可校验的
+      if (skippedGroups.has(group)) {
+        warn(`跳过 ${group} 的校验：${skippedGroups.get(group)}`);
+        continue;
+      }
+      const dir = path.join(claudeHome, GROUP_DIRS[group]);
+      const groupSources = new Map(
+        groupItems.map(item => [item.id, sources.get(`${group}:${item.id}`) || '']),
+      );
+      try {
+        verifyFailed += verifyGroup(group, dir, groupItems, groupSources, { dryRun: options.dryRun });
+      } catch (error) {
+        fail(`校验 ${group} 失败: ${error.message}`);
         installFailed = true;
-        continue;
-      }
-      sources.set(`${group}:${item.id}`, source);
-
-      const origin = item.localUsable ? '本地覆盖' : `${item.repo}@${item.ref}`;
-      // 目标路径必须落在本组目录内 —— id 已在配置校验里过了白名单，这里再兜一层
-      const target =
-        group === 'skills'
-          ? resolveInside(dir, item.id)
-          : resolveInside(dir, `${item.id}${COMPONENT_EXT}`);
-      if (!target) {
-        fail(`${group}/${item.id}: 目标路径越界，拒绝写入（${dir}）`);
-        installFailed = true;
-        continue;
-      }
-
-      if (options.dryRun) {
-        log(`[dry-run] install ${group}/${item.id} ← ${origin}: ${source}`);
-        continue;
-      }
-
-      if (group === 'skills') {
-        fs.rmSync(target, { recursive: true, force: true });
-        const normalized = copyTree(source, target, { normalize: true });
-        log(`install ${group}/${item.id} ← ${origin}`);
-        if (normalized > 0) log(`  行尾规范化：${normalized} 个文件 CRLF → LF`);
-      } else {
-        fs.mkdirSync(dir, { recursive: true });
-        fs.copyFileSync(source, target);
-        log(`install ${group}/${item.id} ← ${origin}`);
       }
     }
-  }
-
-  // 4. hooks 设置
-  log('--- 配置 hooks ---');
-  let hooksFailed = false;
-  if (options.dryRun) {
-    log(
-      `[dry-run] 将幂等地写入 ${settingsFile} 的 PreToolUse/PostToolUse observe.sh 钩子 + PYTHONUTF8=1（observe.sh 已安装时才注册）`,
-    );
-  } else {
-    try {
-      configureHooks(settingsFile, claudeHome);
-    } catch (error) {
-      // 不能在这里 exit：组件已经装好了，直接退出会跳过收尾（备份目录提示 + 检出缓存清理）
-      fail(`配置 hooks 失败: ${error.message}`);
-      hooksFailed = true;
+    console.log('');
+    console.log('  SOURCE: identical=字节一致  identical*=仅 CRLF/LF 行尾差异  differs=内容不一致  no-source=无可比对来源');
+    console.log('');
+  } catch (error) {
+    fail(`安装过程出错: ${error.message}`);
+    if (error.stack) console.error(error.stack);
+    installFailed = true;
+  } finally {
+    // 6. 收尾 —— 走到哪一步都要执行
+    console.log('');
+    if (backups.length) {
+      log(`备份目录：${backups.join('  ')}`);
     }
+    if (resolved.destParent) {
+      log(`GitHub 检出缓存：${resolved.destParent}`);
+      if (!options.dryRun) pruneCache(options.cacheDir);
+    }
+    if (options.dryRun) log('[dry-run] 结束，未写入任何文件');
+    else log('下一步：重启 Claude Code 后新 skill / command / agent 才会生效');
   }
 
-  // 5. 校验
-  log('--- 校验安装结果 ---');
-  let verifyFailed = 0;
-  for (const group of groups) {
-    const groupItems = items.filter(item => item.kind === group);
-    const dir = path.join(claudeHome, GROUP_DIRS[group]);
-    const groupSources = new Map(
-      groupItems.map(item => [item.id, sources.get(`${group}:${item.id}`) || '']),
-    );
-    verifyFailed += verifyGroup(group, dir, groupItems, groupSources, { dryRun: options.dryRun });
-  }
-  console.log('');
-  console.log('  SOURCE: identical=字节一致  identical*=仅 CRLF/LF 行尾差异  differs=内容不一致  no-source=无可比对来源');
-  console.log('');
-
-  // 6. 收尾
-  if (options.dryRun) {
-    log('[dry-run] 结束，未写入任何文件');
-    return verifyFailed || (installFailed || hooksFailed ? 1 : 0);
-  }
-
-  console.log('');
-  if (backups.length) {
-    log(`备份目录：${backups.join('  ')}`);
-  }
-  if (resolved.destParent) {
-    log(`GitHub 检出缓存：${resolved.destParent}`);
-    pruneCache(options.cacheDir);
-  }
-  log('下一步：重启 Claude Code 后新 skill / command / agent 才会生效');
   return verifyFailed || (installFailed || hooksFailed ? 1 : 0);
 }
 
