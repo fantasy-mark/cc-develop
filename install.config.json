@@ -1,0 +1,129 @@
+{
+  "$comment": [
+    "install-skills.mjs 的唯一真源：改这个文件就能换掉本机装的 skill / command / agent。",
+    "每条记录 = 从哪个仓库(owner/name)的哪个 ref 的哪个 path 取，装到本机叫什么。",
+    "id   装到本机后的名字：skills 用作目录名，commands/agents 用作文件名(自动补 .md)",
+    "path 仓库内相对路径；skill 写目录，command/agent 写文件(.md 可省略)",
+    "local 可选：指向本目录下的本地文件，存在时优先用它（给「官方版本 + 本地微调」留口子）"
+  ],
+  "skills": [
+    {
+      "id": "agent-eval",
+      "repo": "affaan-m/ECC",
+      "ref": "v2.2.3",
+      "path": "skills/agent-eval"
+    },
+    {
+      "id": "continuous-learning-v2",
+      "repo": "affaan-m/ECC",
+      "ref": "v2.2.3",
+      "path": "skills/continuous-learning-v2"
+    },
+    {
+      "id": "e2e-testing",
+      "repo": "affaan-m/ECC",
+      "ref": "v2.2.3",
+      "path": "skills/e2e-testing"
+    },
+    {
+      "id": "tdd-workflow",
+      "repo": "affaan-m/ECC",
+      "ref": "v2.2.3",
+      "path": "skills/tdd-workflow"
+    },
+    {
+      "id": "verification-loop",
+      "repo": "affaan-m/ECC",
+      "ref": "v2.2.3",
+      "path": "skills/verification-loop"
+    },
+    {
+      "id": "mcp-builder",
+      "repo": "anthropics/skills",
+      "ref": "main",
+      "path": "skills/mcp-builder"
+    },
+    {
+      "id": "pptx",
+      "repo": "anthropics/skills",
+      "ref": "main",
+      "path": "skills/pptx"
+    },
+    {
+      "id": "skill-creator",
+      "repo": "anthropics/skills",
+      "ref": "main",
+      "path": "skills/skill-creator"
+    }
+  ],
+  "commands": [
+    {
+      "id": "code-review",
+      "repo": "affaan-m/ECC",
+      "ref": "v2.2.3",
+      "path": "commands/code-review.md"
+    }
+  ],
+  "agents": [
+    {
+      "id": "code-architect",
+      "repo": "affaan-m/ECC",
+      "ref": "v2.2.3",
+      "path": "agents/code-architect.md"
+    },
+    {
+      "id": "code-explorer",
+      "repo": "affaan-m/ECC",
+      "ref": "v2.2.3",
+      "path": "agents/code-explorer.md"
+    },
+    {
+      "id": "code-reviewer",
+      "repo": "affaan-m/ECC",
+      "ref": "v2.2.3",
+      "path": "agents/code-reviewer.md"
+    },
+    {
+      "id": "code-simplifier",
+      "repo": "affaan-m/ECC",
+      "ref": "v2.2.3",
+      "path": "agents/code-simplifier.md"
+    },
+    {
+      "id": "e2e-runner",
+      "repo": "affaan-m/ECC",
+      "ref": "v2.2.3",
+      "path": "agents/e2e-runner.md"
+    },
+    {
+      "id": "loop-operator",
+      "repo": "affaan-m/ECC",
+      "ref": "v2.2.3",
+      "path": "agents/loop-operator.md"
+    },
+    {
+      "id": "python-reviewer",
+      "repo": "affaan-m/ECC",
+      "ref": "v2.2.3",
+      "path": "agents/python-reviewer.md"
+    },
+    {
+      "id": "refactor-cleaner",
+      "repo": "affaan-m/ECC",
+      "ref": "v2.2.3",
+      "path": "agents/refactor-cleaner.md"
+    },
+    {
+      "id": "tdd-guide",
+      "repo": "affaan-m/ECC",
+      "ref": "v2.2.3",
+      "path": "agents/tdd-guide.md"
+    },
+    {
+      "id": "typescript-reviewer",
+      "repo": "affaan-m/ECC",
+      "ref": "v2.2.3",
+      "path": "agents/typescript-reviewer.md"
+    }
+  ]
+}
